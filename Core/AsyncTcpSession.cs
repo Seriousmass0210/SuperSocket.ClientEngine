@@ -4,13 +4,16 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 
 namespace SuperSocket.ClientEngine
 {
     public class AsyncTcpSession : TcpClientSession
     {
-        private SocketAsyncEventArgs m_SocketEventArgs;
-        private SocketAsyncEventArgs m_SocketEventArgsSend;
+        private SocketAsyncEventArgs m_recvSocketEventArgs;
+        private SocketAsyncEventArgs m_sendSocketEventArgs;
+        private SpinLock m_closeLocker;
+        private bool m_IsClosing;
 
         public AsyncTcpSession()
             : base()
@@ -33,10 +36,7 @@ namespace SuperSocket.ClientEngine
         {
             base.SetBuffer(bufferSegment);
 
-            if (m_SocketEventArgs != null)
-            {
-                m_SocketEventArgs.SetBuffer(bufferSegment.Array, bufferSegment.Offset, bufferSegment.Count);
-            }
+            m_recvSocketEventArgs?.SetBuffer(bufferSegment.Array, bufferSegment.Offset, bufferSegment.Count);
         }
 
         protected override void OnGetSocket(SocketAsyncEventArgs e)
@@ -55,42 +55,44 @@ namespace SuperSocket.ClientEngine
 
             e.SetBuffer(Buffer.Array, Buffer.Offset, Buffer.Count);
 
-            m_SocketEventArgs = e;
+            m_recvSocketEventArgs = e;
 
             OnConnected();
             StartReceive();
         }
 
-        private void BeginReceive()
-        {
-            if (!Client.ReceiveAsync(m_SocketEventArgs))
-                ProcessReceive(m_SocketEventArgs);
-        }
-
         private void ProcessReceive(SocketAsyncEventArgs e)
         {
-            if (e.SocketError != SocketError.Success)
+            SocketAsyncEventArgs args = e;
+            if (args == null)
+                return;
+
+            if (args.SocketError != SocketError.Success)
             {
-                if(EnsureSocketClosed())
+                if (EnsureSocketClosed())
                     OnClosed();
-                if(!IsIgnorableSocketError((int)e.SocketError))
-                    OnError(new SocketException((int)e.SocketError));
+                if (!IsIgnorableSocketError((int)args.SocketError))
+                    OnError(new SocketException((int)args.SocketError));
                 return;
             }
 
-            if (e.BytesTransferred == 0)
+            if (args.BytesTransferred == 0)
             {
-                if(EnsureSocketClosed())
+                if (EnsureSocketClosed())
                     OnClosed();
                 return;
             }
 
-            OnDataReceived(e.Buffer, e.Offset, e.BytesTransferred);
+            OnDataReceived(args.Buffer, args.Offset, args.BytesTransferred);
             StartReceive();
         }
 
         void StartReceive()
         {
+            SocketAsyncEventArgs args = m_recvSocketEventArgs;
+            if (args == null)
+                return;
+
             bool raiseEvent;
 
             var client = Client;
@@ -100,29 +102,29 @@ namespace SuperSocket.ClientEngine
 
             try
             {
-                raiseEvent = client.ReceiveAsync(m_SocketEventArgs);
+                raiseEvent = client.ReceiveAsync(args);
             }
-            catch (SocketException exc)
+            catch (SocketException ex)
             {
                 int errorCode;
 
 #if !NETFX_CORE
-                errorCode = exc.ErrorCode;
+                errorCode = ex.ErrorCode;
 #else
-                errorCode = (int)exc.SocketErrorCode;
+                errorCode = (int)ex.SocketErrorCode;
 #endif
 
                 if (!IsIgnorableSocketError(errorCode))
-                    OnError(exc);
+                    OnError(ex);
 
                 if (EnsureSocketClosed(client))
                     OnClosed();
 
                 return;
             }
-            catch(Exception e)
+            catch (Exception e)
             {
-                if(!IsIgnorableException(e))
+                if (!IsIgnorableException(e))
                     OnError(e);
 
                 if (EnsureSocketClosed(client))
@@ -132,16 +134,31 @@ namespace SuperSocket.ClientEngine
             }
 
             if (!raiseEvent)
-                ProcessReceive(m_SocketEventArgs);
+                ProcessReceive(args);
         }
 
         protected override void SendInternal(PosList<ArraySegment<byte>> items)
         {
-            if (m_SocketEventArgsSend == null)
+            bool lockTaken = false;
+
+            try
             {
-                m_SocketEventArgsSend = new SocketAsyncEventArgs();
-                m_SocketEventArgsSend.Completed += new EventHandler<SocketAsyncEventArgs>(Sending_Completed);
+                m_closeLocker.Enter(ref lockTaken);
+                if (!m_IsClosing && m_sendSocketEventArgs == null)
+                {
+                    m_sendSocketEventArgs = new SocketAsyncEventArgs();
+                    m_sendSocketEventArgs.Completed += new EventHandler<SocketAsyncEventArgs>(Sending_Completed);
+                }
             }
+            finally
+            {
+                if (lockTaken)
+                    m_closeLocker.Exit();
+            }
+
+            SocketAsyncEventArgs args = m_sendSocketEventArgs;
+            if (args == null)
+                return;
 
             bool raiseEvent;
 
@@ -149,10 +166,10 @@ namespace SuperSocket.ClientEngine
             {
                 if (items.Count > 1)
                 {
-                    if (m_SocketEventArgsSend.Buffer != null)
-                        m_SocketEventArgsSend.SetBuffer(null, 0, 0);
+                    if (args.Buffer != null)
+                        args.SetBuffer(null, 0, 0);
 
-                    m_SocketEventArgsSend.BufferList = items;
+                    args.BufferList = items;
                 }
                 else
                 {
@@ -160,54 +177,58 @@ namespace SuperSocket.ClientEngine
 
                     try
                     {
-                        if (m_SocketEventArgsSend.BufferList != null)
-                            m_SocketEventArgsSend.BufferList = null;
+                        if (args.BufferList != null)
+                            args.BufferList = null;
                     }
                     catch//a strange NullReference exception
                     {
                     }
 
-                    m_SocketEventArgsSend.SetBuffer(currentItem.Array, currentItem.Offset, currentItem.Count);
+                    args.SetBuffer(currentItem.Array, currentItem.Offset, currentItem.Count);
                 }
-                
 
-                raiseEvent = Client.SendAsync(m_SocketEventArgsSend);
+
+                raiseEvent = Client.SendAsync(args);
             }
-            catch (SocketException exc)
+            catch (SocketException ex)
             {
                 int errorCode;
 
 #if !NETFX_CORE
-                errorCode = exc.ErrorCode;
+                errorCode = ex.ErrorCode;
 #else
-                errorCode = (int)exc.SocketErrorCode;
+                errorCode = (int)ex.SocketErrorCode;
 #endif
 
                 if (EnsureSocketClosed() && !IsIgnorableSocketError(errorCode))
-                    OnError(exc);
+                    OnError(ex);
 
                 return;
             }
-            catch (Exception e)
+            catch (Exception ex)
             {
-                if (EnsureSocketClosed() && IsIgnorableException(e))
-                    OnError(e);
+                if (EnsureSocketClosed() && IsIgnorableException(ex))
+                    OnError(ex);
                 return;
             }
 
             if (!raiseEvent)
-                Sending_Completed(Client, m_SocketEventArgsSend);
+                Sending_Completed(Client, args);
         }
 
         void Sending_Completed(object sender, SocketAsyncEventArgs e)
         {
-            if (e.SocketError != SocketError.Success || e.BytesTransferred == 0)
+            SocketAsyncEventArgs args = e;
+            if (args == null)
+                return;
+
+            if (args.SocketError != SocketError.Success || args.BytesTransferred == 0)
             {
-                if(EnsureSocketClosed())
+                if (EnsureSocketClosed())
                     OnClosed();
 
-                if (e.SocketError != SocketError.Success && !IsIgnorableSocketError((int)e.SocketError))
-                    OnError(new SocketException((int)e.SocketError));
+                if (args.SocketError != SocketError.Success && !IsIgnorableSocketError((int)args.SocketError))
+                    OnError(new SocketException((int)args.SocketError));
 
                 return;
             }
@@ -217,19 +238,27 @@ namespace SuperSocket.ClientEngine
 
         protected override void OnClosed()
         {
-            if (m_SocketEventArgsSend != null)
-            {
-                m_SocketEventArgsSend.Dispose();
-                m_SocketEventArgsSend = null;
-            }
+            bool lockTaken = false;
 
-            if (m_SocketEventArgs != null)
+            try
             {
-                m_SocketEventArgs.Dispose();
-                m_SocketEventArgs = null;
-            }
+                m_closeLocker.Enter(ref lockTaken);
 
-            base.OnClosed();
+                m_IsClosing = true;
+
+                m_sendSocketEventArgs.Dispose();
+                m_sendSocketEventArgs = null;
+
+                m_recvSocketEventArgs.Dispose();
+                m_recvSocketEventArgs = null;
+
+                base.OnClosed();
+            }
+            finally
+            {
+                if (lockTaken)
+                    m_closeLocker.Exit();
+            }
         }
     }
 }

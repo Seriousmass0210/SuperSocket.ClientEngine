@@ -13,9 +13,9 @@ namespace SuperSocket.ClientEngine
     public abstract class EasyClientBase
     {
         private IClientSession m_Session;
-        private TaskCompletionSource<bool> m_ConnectTaskSource;
-        private TaskCompletionSource<bool> m_CloseTaskSource;
-        private bool m_Connected = false;
+        private TaskCompletionSource<bool> m_ConnectPromise;
+        private TaskCompletionSource<bool> m_ClosePromise;
+        private bool m_IsConnected = false;
 
         protected IPipelineProcessor PipeLineProcessor { get; set; }
 
@@ -34,7 +34,7 @@ namespace SuperSocket.ClientEngine
             {
                 if (m_LocalEndPoint != null)
                     return m_LocalEndPoint;
-                    
+
                 return m_EndPointToBind;
             }
             set
@@ -68,11 +68,11 @@ namespace SuperSocket.ClientEngine
 
         }
 
-        public bool IsConnected { get { return m_Connected; } }
+        public bool IsConnected { get { return m_IsConnected; } }
 
 
 
-#if AWAIT
+#if !AWAIT
         public async Task<bool> ConnectAsync(EndPoint remoteEndPoint)
         {
             if (PipeLineProcessor == null)
@@ -104,7 +104,7 @@ namespace SuperSocket.ClientEngine
                 return new AsyncTcpSession();
             }
 
-    #if SILVERLIGHT
+#if SILVERLIGHT
             // no SSL/TLS enabled
             if (!security.EnabledSslProtocols)
             {
@@ -112,7 +112,7 @@ namespace SuperSocket.ClientEngine
             }
 
             return new SslStreamTcpSession();
-    #else
+#else
             // no SSL/TLS enabled
             if (security.EnabledSslProtocols == System.Security.Authentication.SslProtocols.None)
             {
@@ -123,7 +123,7 @@ namespace SuperSocket.ClientEngine
             {
                 Security = security
             };
-    #endif
+#endif
 #endif
         }
 
@@ -144,7 +144,7 @@ namespace SuperSocket.ClientEngine
 
             if (Proxy != null)
                 session.Proxy = Proxy;
-                
+
             session.Connected += new EventHandler(OnSessionConnected);
             session.Error += new EventHandler<ErrorEventArgs>(OnSessionError);
             session.Closed += new EventHandler(OnSessionClosed);
@@ -154,14 +154,14 @@ namespace SuperSocket.ClientEngine
                 session.ReceiveBufferSize = ReceiveBufferSize;
 
             m_Session = session;
-            
-            var taskSrc = m_ConnectTaskSource = new TaskCompletionSource<bool>();
+
+            var connectPromise = m_ConnectPromise = new TaskCompletionSource<bool>();
 
             session.Connect(remoteEndPoint);
-            
-            return taskSrc;
+
+            return connectPromise;
         }
-        
+
         public void Send(byte[] data)
         {
             Send(new ArraySegment<byte>(data, 0, data.Length));
@@ -170,8 +170,8 @@ namespace SuperSocket.ClientEngine
         public void Send(ArraySegment<byte> segment)
         {
             var session = m_Session;
-            
-            if(!m_Connected || session == null)
+
+            if (!m_IsConnected || session == null)
                 throw new Exception("The socket is not connected.");
 
             session.Send(segment);
@@ -180,14 +180,14 @@ namespace SuperSocket.ClientEngine
         public void Send(List<ArraySegment<byte>> segments)
         {
             var session = m_Session;
-            
-            if(!m_Connected || session == null)
+
+            if (!m_IsConnected || session == null)
                 throw new Exception("The socket is not connected.");
 
             session.Send(segments);
         }
 
-#if AWAIT
+#if !AWAIT
         public async Task<bool> Close()
         {
             var session = m_Session;
@@ -202,22 +202,22 @@ namespace SuperSocket.ClientEngine
 
             return await Task.FromResult(false);
         }
- #else
+#else
         public Task<bool> Close()
         {
             var session = m_Session;
-            
-            if(session != null && m_Connected)
+
+            if (session != null && m_IsConnected)
             {
-                var closeTaskSrc = new TaskCompletionSource<bool>();
-                m_CloseTaskSource = closeTaskSrc;
+                var closePromise = new TaskCompletionSource<bool>();
+                m_ClosePromise = closePromise;
                 session.Close();
-                return closeTaskSrc.Task;
+                return closePromise.Task;
             }
 
-            return new Task<bool>(() => false);
+            return Task.FromResult(false);
         }
- #endif
+#endif
 
         void OnSessionDataReceived(object sender, DataEventArgs e)
         {
@@ -227,9 +227,9 @@ namespace SuperSocket.ClientEngine
             {
                 result = PipeLineProcessor.Process(new ArraySegment<byte>(e.Data, e.Offset, e.Length));
             }
-            catch(Exception exc)
+            catch (Exception ex)
             {
-                OnError(exc);
+                OnError(ex);
                 m_Session.Close();
                 return;
             }
@@ -266,7 +266,7 @@ namespace SuperSocket.ClientEngine
 
         void OnSessionError(object sender, ErrorEventArgs e)
         {
-            if (!m_Connected)
+            if (!m_IsConnected)
             {
                 FinishConnectTask(false);
             }
@@ -276,14 +276,14 @@ namespace SuperSocket.ClientEngine
 
         bool FinishConnectTask(bool result)
         {
-            var connectTaskSource = m_ConnectTaskSource;
+            var connectPromise = m_ConnectPromise;
 
-            if (connectTaskSource == null)
+            if (connectPromise == null)
                 return false;
 
-            if (Interlocked.CompareExchange(ref m_ConnectTaskSource, null, connectTaskSource) == connectTaskSource)
+            if (Interlocked.CompareExchange(ref m_ConnectPromise, null, connectPromise) == connectPromise)
             {
-                connectTaskSource.SetResult(result);
+                connectPromise.SetResult(result);
                 return true;
             }
 
@@ -299,7 +299,7 @@ namespace SuperSocket.ClientEngine
         {
             var handler = Error;
 
-            if(handler != null)
+            if (handler != null)
                 handler(this, args);
         }
 
@@ -307,7 +307,7 @@ namespace SuperSocket.ClientEngine
 
         void OnSessionClosed(object sender, EventArgs e)
         {
-            m_Connected = false;
+            m_IsConnected = false;
 
 #if !SILVERLIGHT
             m_LocalEndPoint = null;
@@ -324,13 +324,13 @@ namespace SuperSocket.ClientEngine
                 handler(this, EventArgs.Empty);
 
 
-            var closeTaskSrc = m_CloseTaskSource;
-            
-            if(closeTaskSrc != null)
+            var closePromise = m_ClosePromise;
+
+            if (closePromise != null)
             {
-                if(Interlocked.CompareExchange(ref m_CloseTaskSource, null, closeTaskSrc) == closeTaskSrc)
+                if (Interlocked.CompareExchange(ref m_ClosePromise, null, closePromise) == closePromise)
                 {
-                    closeTaskSrc.SetResult(true);
+                    closePromise.SetResult(true);
                 }
             }
         }
@@ -339,7 +339,7 @@ namespace SuperSocket.ClientEngine
 
         void OnSessionConnected(object sender, EventArgs e)
         {
-            m_Connected = true;
+            m_IsConnected = true;
 
 #if !SILVERLIGHT
             TcpClientSession session = sender as TcpClientSession;
@@ -352,7 +352,7 @@ namespace SuperSocket.ClientEngine
             FinishConnectTask(true);
 
             var handler = Connected;
-            if(handler != null)
+            if (handler != null)
             {
                 handler(this, EventArgs.Empty);
             }

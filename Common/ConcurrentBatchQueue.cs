@@ -90,10 +90,13 @@ namespace SuperSocket.ClientEngine
         {
             bool full;
 
+            SpinWait spinWait = new SpinWait();
             while (true)
             {
                 if (TryEnqueue(item, out full) || full)
                     break;
+
+                spinWait.SpinOnce();
             }
 
             return !full;
@@ -113,7 +116,7 @@ namespace SuperSocket.ClientEngine
                 return false;
             }
 
-            if(entity != m_Entity)
+            if (entity != m_Entity)
                 return false;
 
             int oldCount = Interlocked.CompareExchange(ref entity.Count, count + 1, count);
@@ -134,10 +137,13 @@ namespace SuperSocket.ClientEngine
         {
             bool full;
 
+            SpinWait spinWait = new SpinWait();
             while (true)
             {
                 if (TryEnqueue(items, out full) || full)
                     break;
+
+                spinWait.SpinOnce();
             }
 
             return !full;
@@ -194,15 +200,11 @@ namespace SuperSocket.ClientEngine
             if (!ReferenceEquals(oldEntity, entity))
                 return false;
 
-            var spinWait = new SpinWait();
-
-            spinWait.SpinOnce();
-
-            count = entity.Count;
-
             var array = entity.Array;
 
             var i = 0;
+
+            var spinWait = new SpinWait();
 
             while (true)
             {
@@ -210,8 +212,9 @@ namespace SuperSocket.ClientEngine
 
                 while (m_NullValidator(item))
                 {
-                    spinWait.SpinOnce();
                     item = array[i];
+
+                    spinWait.SpinOnce();
                 }
 
                 outputItems.Add(item);

@@ -11,7 +11,7 @@ namespace SuperSocket.ClientEngine
     {
         protected string HostName { get; private set; }
 
-        private bool m_InConnecting = false;        
+        private bool m_InConnecting = false;
 
         public TcpClientSession()
             : base()
@@ -159,7 +159,7 @@ namespace SuperSocket.ClientEngine
 
                 if (e != null)
                     e.Dispose();
-                
+
                 return;
             }
 
@@ -194,7 +194,7 @@ namespace SuperSocket.ClientEngine
                 catch (Exception)
                 {
                     socketError = SocketError.HostUnreachable;
-                }                
+                }
 #endif
                 OnError(new SocketException((int)socketError));
                 return;
@@ -247,7 +247,7 @@ namespace SuperSocket.ClientEngine
             catch
             {
             }
-            
+
 #endif
             OnGetSocket(e);
         }
@@ -264,7 +264,7 @@ namespace SuperSocket.ClientEngine
             var ipEndPoint = endPoint as IPEndPoint;
 
             if (ipEndPoint != null && ipEndPoint.Address != null)
-               return ipEndPoint.Address.ToString();
+                return ipEndPoint.Address.ToString();
 
             return string.Empty;
         }
@@ -301,7 +301,7 @@ namespace SuperSocket.ClientEngine
                 client.Shutdown(SocketShutdown.Both);
             }
             catch
-            {}
+            { }
             finally
             {
                 try
@@ -313,7 +313,7 @@ namespace SuperSocket.ClientEngine
 #endif
                 }
                 catch
-                {}
+                { }
             }
 
             return fireOnClosedEvent;
@@ -357,10 +357,7 @@ namespace SuperSocket.ClientEngine
 
         private int m_IsSending = 0;
 
-        protected bool IsSending
-        {
-            get { return m_IsSending == 1; }
-        }
+        private long m_IsEnqueing = 0;
 
         public override bool TrySend(ArraySegment<byte> segment)
         {
@@ -375,7 +372,11 @@ namespace SuperSocket.ClientEngine
                 return true;
             }
 
+            Interlocked.Increment(ref m_IsEnqueing);
+
             var isEnqueued = GetSendingQueue().Enqueue(segment);
+
+            Interlocked.Decrement(ref m_IsEnqueing);
 
             if (Interlocked.CompareExchange(ref m_IsSending, 1, 0) != 0)
                 return isEnqueued;
@@ -395,7 +396,7 @@ namespace SuperSocket.ClientEngine
             for (var i = 0; i < segments.Count; i++)
             {
                 var seg = segments[i];
-                
+
                 if (seg.Count == 0)
                 {
                     throw new Exception("The data piece to be sent cannot be empty.");
@@ -408,7 +409,11 @@ namespace SuperSocket.ClientEngine
                 return true;
             }
 
+            Interlocked.Increment(ref m_IsEnqueing);
+
             var isEnqueued = GetSendingQueue().Enqueue(segments);
+
+            Interlocked.Decrement(ref m_IsEnqueing);
 
             if (Interlocked.CompareExchange(ref m_IsSending, 1, 0) != 0)
                 return isEnqueued;
@@ -422,10 +427,22 @@ namespace SuperSocket.ClientEngine
         {
             var sendingItems = GetSendingItems();
 
-            if (!m_SendingQueue.TryDequeue(sendingItems))
+            SpinWait spinWait = new SpinWait();
+
+            while (true)
             {
-                m_IsSending = 0;
-                return;
+                if (!m_SendingQueue.TryDequeue(sendingItems))
+                {
+                    if (Interlocked.Read(ref m_IsEnqueing) == 0)
+                    {
+                        m_IsSending = 0;
+                        return;
+                    }
+                }
+                else
+                    break;
+
+                spinWait.SpinOnce();
             }
 
             SendInternal(sendingItems);
@@ -439,10 +456,22 @@ namespace SuperSocket.ClientEngine
             sendingItems.Clear();
             sendingItems.Position = 0;
 
-            if (!m_SendingQueue.TryDequeue(sendingItems))
+            SpinWait spinWait = new SpinWait();
+
+            while (true)
             {
-                m_IsSending = 0;
-                return;
+                if (!m_SendingQueue.TryDequeue(sendingItems))
+                {
+                    if (Interlocked.Read(ref m_IsEnqueing) == 0)
+                    {
+                        m_IsSending = 0;
+                        return;
+                    }
+                }
+                else
+                    break;
+
+                spinWait.SpinOnce();
             }
 
             SendInternal(sendingItems);

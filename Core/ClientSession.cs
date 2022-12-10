@@ -10,7 +10,7 @@ namespace SuperSocket.ClientEngine
     public abstract class ClientSession : IClientSession, IBufferSetter
     {
         public const int DefaultReceiveBufferSize = 4096;
-        
+
         protected Socket Client { get; set; }
 
         Socket IClientSession.Socket
@@ -82,10 +82,10 @@ namespace SuperSocket.ClientEngine
 
             while (true)
             {
-                spinWait.SpinOnce();
-
                 if (TrySend(segment))
                     return;
+
+                spinWait.SpinOnce();
             }
         }
 
@@ -98,10 +98,10 @@ namespace SuperSocket.ClientEngine
 
             while (true)
             {
-                spinWait.SpinOnce();
-
                 if (TrySend(segments))
                     return;
+
+                spinWait.SpinOnce();
             }
         }
 #endif
@@ -119,7 +119,7 @@ namespace SuperSocket.ClientEngine
         protected virtual void OnClosed()
         {
             IsConnected = false;
-            LocalEndPoint =  null;
+            LocalEndPoint = null;
 
             var handler = m_Closed;
 
@@ -156,11 +156,11 @@ namespace SuperSocket.ClientEngine
         {
             var client = Client;
 
-            if(client != null)
+            if (client != null)
             {
                 try
                 {
-                    if(client.NoDelay != NoDelay)
+                    if (client.NoDelay != NoDelay)
                         client.NoDelay = NoDelay;
                 }
                 catch
