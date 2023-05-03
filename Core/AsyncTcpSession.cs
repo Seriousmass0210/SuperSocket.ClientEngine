@@ -246,10 +246,10 @@ namespace SuperSocket.ClientEngine
 
                 m_IsClosing = true;
 
-                m_sendSocketEventArgs.Dispose();
+                m_sendSocketEventArgs?.Dispose();
                 m_sendSocketEventArgs = null;
 
-                m_recvSocketEventArgs.Dispose();
+                m_recvSocketEventArgs?.Dispose();
                 m_recvSocketEventArgs = null;
 
                 base.OnClosed();
